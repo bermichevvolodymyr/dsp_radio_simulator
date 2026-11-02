@@ -104,6 +104,7 @@ export class AudioEngine {
   // Crash State
   private isCrashed: boolean = false;
   private lastPresetConfig: PresetConfig | null = null;
+  private currentSpatialEffect: SpatialEffect = SpatialEffect.NONE;
 
   constructor() {
     this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -283,17 +284,22 @@ export class AudioEngine {
 
       const targetMusicGain = this.isEASActive ? 0.05 : mainVol;
       
+      this.musicGain.gain.cancelScheduledValues(t);
       this.musicGain.gain.setTargetAtTime(targetMusicGain, t, 0.1);
+      this.interferenceGain.gain.cancelScheduledValues(t);
       this.interferenceGain.gain.setTargetAtTime(neighborVol, t, 0.1);
       
       const totalNoise = Math.min(1.0, effectiveNoiseLevel + tuningNoise);
       if (totalNoise > 0.001) {
           if (!this.noiseNode) this.startNoise(totalNoise);
+          this.noiseGain.gain.cancelScheduledValues(t);
           this.noiseGain.gain.setTargetAtTime(totalNoise * 0.5, t, 0.1);
       } else {
+          this.noiseGain.gain.cancelScheduledValues(t);
           this.noiseGain.gain.setTargetAtTime(0, t, 0.1);
       }
 
+      this.tuningLowPass.frequency.cancelScheduledValues(t);
       this.tuningLowPass.frequency.setTargetAtTime(Math.max(100, finalFilterFreq), t, 0.1);
   }
 
@@ -382,6 +388,7 @@ export class AudioEngine {
   }
 
   public toggleBroadcastCut(cut: boolean) {
+      if (this.isBroadcastCut === cut) return;
       this.isBroadcastCut = cut;
       this.updateMix();
       
@@ -396,6 +403,7 @@ export class AudioEngine {
   // --- DRAMATIC SIGNAL FAILURE (CRASH) ---
 
   public triggerSignalCrash(active: boolean) {
+    if (this.isCrashed === active) return;
     this.isCrashed = active;
     const t = this.ctx.currentTime;
 
@@ -459,6 +467,7 @@ export class AudioEngine {
       if (this.ctx.state === 'suspended') {
           this.ctx.resume();
       }
+      if (this.isEASActive === active) return;
       this.isEASActive = active;
 
       if (active) {
@@ -618,6 +627,12 @@ export class AudioEngine {
     this.startTime = this.ctx.currentTime - startOffset;
     
     this.sourceNode.start(0, startOffset);
+    
+    // Re-apply crash state to new source node if active
+    if (this.isCrashed) {
+        this.sourceNode.playbackRate.setValueAtTime(0.05, this.ctx.currentTime);
+    }
+    
     this.isPlaying = true;
   }
 
@@ -649,19 +664,14 @@ export class AudioEngine {
         this.noiseNode = null;
     }
 
-    this.triggerEAS(false);
-    this.toggleTestTone(false);
-    this.toggleTapping(false);
-    this.isBroadcastCut = false;
-    this.isCrashed = false;
-    
-    // Stop Auto Tuner on full stop
     if (resetTime) {
+        this.triggerEAS(false);
+        this.toggleTestTone(false);
+        this.toggleTapping(false);
+        this.isBroadcastCut = false;
+        this.isCrashed = false;
         this.setAutoInterference(AutoInterferenceMode.OFF);
-    }
-
-    if (resetTime) {
-      this.pauseTime = 0;
+        this.pauseTime = 0;
     } else if (this.isPlaying) {
       // Capture the current pause time relative to when we started
       this.pauseTime = this.ctx.currentTime - this.startTime;
@@ -695,7 +705,9 @@ export class AudioEngine {
 
   public applyPreset(preset: PresetConfig) {
     this.lastPresetConfig = preset; 
+    this.highPassFilter.frequency.cancelScheduledValues(this.ctx.currentTime);
     this.highPassFilter.frequency.setTargetAtTime(preset.highPassFreq, this.ctx.currentTime, 0.1);
+    this.lowPassFilter.frequency.cancelScheduledValues(this.ctx.currentTime);
     this.lowPassFilter.frequency.setTargetAtTime(preset.lowPassFreq, this.ctx.currentTime, 0.1);
 
     this.setDistortionLevel(preset.distortion);
@@ -725,12 +737,16 @@ export class AudioEngine {
   
   public setWobbleLevel(amount: number) {
       const depth = amount * 0.003; 
+      this.wobbleGain.gain.cancelScheduledValues(this.ctx.currentTime);
       this.wobbleGain.gain.setTargetAtTime(depth, this.ctx.currentTime, 0.2);
+      this.wobbleLFO.frequency.cancelScheduledValues(this.ctx.currentTime);
       this.wobbleLFO.frequency.setTargetAtTime(0.5 + (amount * 2), this.ctx.currentTime, 0.2);
   }
 
   public setDegradation(frequency: number, intensity: number) {
+      this.fadeOsc.frequency.cancelScheduledValues(this.ctx.currentTime);
       this.fadeOsc.frequency.setTargetAtTime(frequency, this.ctx.currentTime, 0.1);
+      this.fadeGain.gain.cancelScheduledValues(this.ctx.currentTime);
       this.fadeGain.gain.setTargetAtTime(intensity * 0.8, this.ctx.currentTime, 0.1);
   }
 
@@ -739,6 +755,9 @@ export class AudioEngine {
   }
 
   public setSpatialEffect(effect: SpatialEffect) {
+      if (this.currentSpatialEffect === effect) return;
+      this.currentSpatialEffect = effect;
+
       this.spatialInput.disconnect();
       this.convolver.disconnect();
       this.roomFilter.disconnect();
